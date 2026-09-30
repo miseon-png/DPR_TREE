@@ -50,7 +50,7 @@ def parse_statement_text(text, default_filename=""):
     if date_match:
         y, m, d = date_match.groups()
         date_str = f"{y}년 {int(m):02d}월 {int(d):02d}일 월요일"
-        sheet_name = f"{y[2:]}{int(m):02d}{int(d):02d}_생산일보"  # 시트명 예: 260831_생산일보
+        sheet_name = f"{y[2:]}{int(m):02d}{int(d):02d}_생산일보"
         lot_date = f"{y}{int(m):02d}{int(d):02d}"
     else:
         date_str = "2026년 08월 31일 월요일"
@@ -88,7 +88,7 @@ def parse_statement_text(text, default_filename=""):
 
 
 def add_report_sheet(wb, data, writer_name="이미선", is_first=False):
-    """엑셀 워크북에 개별 시트(가로 방향 + 상단 결재란) 추가"""
+    """엑셀 워크북에 개별 시트(가로 방향 + 상단 결재란 정렬 수정완료) 추가"""
     if is_first:
         ws = wb.active
         ws.title = data["sheet_name"]
@@ -117,7 +117,13 @@ def add_report_sheet(wb, data, writer_name="이미선", is_first=False):
     align_center = Alignment(horizontal="center", vertical="center")
     align_left = Alignment(horizontal="left", vertical="center")
 
-    # 1) 제목 및 상단 결재란 (작성 / 검토 / 승인)
+    # 병합 영역 테두리 적용 함수
+    def apply_border(ws, cell_range):
+        for row in ws[cell_range]:
+            for cell in row:
+                cell.border = border_all
+
+    # 1) 제목 및 상단 결재란 (A~E열: 제목 / F열: 결재 / G,H,I열: 작성,검토,승인)
     ws.merge_cells("A1:E2")
     ws["A1"] = "일일 생산일보"
     ws["A1"].font = font_title
@@ -128,34 +134,37 @@ def add_report_sheet(wb, data, writer_name="이미선", is_first=False):
     ws["F1"].font = font_bold
     ws["F1"].fill = fill_gray
     ws["F1"].alignment = align_center
-    ws["F1"].border = border_all
+    apply_border(ws, "F1:F2")
 
-    for idx, title in enumerate(["작 성", "검 토", "승 인"], start=7):
-        col_letter = openpyxl.utils.get_column_letter(idx)
-        ws[f"{col_letter}1"] = title
-        ws[f"{col_letter}1"].font = font_bold
-        ws[f"{col_letter}1"].fill = fill_gray
-        ws[f"{col_letter}1"].alignment = align_center
-        ws[f"{col_letter}1"].border = border_all
-        ws[f"{col_letter}2"].border = border_all
+    approval_titles = [("G", "작 성"), ("H", "검 토"), ("I", "승 인")]
+    for col_let, title in approval_titles:
+        cell_hdr = ws[f"{col_let}1"]
+        cell_hdr.value = title
+        cell_hdr.font = font_bold
+        cell_hdr.fill = fill_gray
+        cell_hdr.alignment = align_center
+        cell_hdr.border = border_all
+
+        cell_box = ws[f"{col_let}2"]
+        cell_box.border = border_all
 
     ws.row_dimensions[1].height = 18
     ws.row_dimensions[2].height = 36
+    ws.row_dimensions[3].height = 10  # 여백 행
 
-    # 2) 기본 정보 (생산일자, 작성자)
+    # 2) 기본 정보 (A~B열: 생산일자 / C~E열: 날짜값 / F열: 작성자 / G~I열: 작성자명)
     ws.merge_cells("A4:B4")
     ws["A4"] = "생산일자"
     ws["A4"].font = font_bold
     ws["A4"].fill = fill_gray
     ws["A4"].alignment = align_center
-    ws["A4"].border = border_all
+    apply_border(ws, "A4:B4")
 
     ws.merge_cells("C4:E4")
     ws["C4"] = data["date_str"]
     ws["C4"].font = font_regular
     ws["C4"].alignment = align_center
-    for c in range(3, 6):
-        ws.cell(row=4, column=c).border = border_all
+    apply_border(ws, "C4:E4")
 
     ws["F4"] = "작성자"
     ws["F4"].font = font_bold
@@ -167,8 +176,9 @@ def add_report_sheet(wb, data, writer_name="이미선", is_first=False):
     ws["G4"] = writer_name
     ws["G4"].font = font_regular
     ws["G4"].alignment = align_center
-    for c in range(7, 10):
-        ws.cell(row=4, column=c).border = border_all
+    apply_border(ws, "G4:I4")
+
+    ws.row_dimensions[4].height = 24
 
     # 3) 헤더 작성 (5행: 대분류, 6행: 세부 항목)
     headers_top = [
@@ -183,12 +193,7 @@ def add_report_sheet(wb, data, writer_name="이미선", is_first=False):
         cell.font = font_bold
         cell.fill = fill_blue
         cell.alignment = align_center
-
-        s_col, s_row = openpyxl.utils.coordinate_to_tuple(rng.split(":")[0])
-        e_col, e_row = openpyxl.utils.coordinate_to_tuple(rng.split(":")[1])
-        for r in range(s_row, e_row + 1):
-            for c in range(s_col, e_col + 1):
-                ws.cell(row=r, column=c).border = border_all
+        apply_border(ws, rng)
 
     headers_detail = [
         "제품명",
@@ -232,17 +237,17 @@ def add_report_sheet(wb, data, writer_name="이미선", is_first=False):
             cell.alignment = align
             cell.border = border_all
 
-    # 5) 가로 레이아웃에 맞춘 열 너비 조정
+    # 5) 가로 레이아웃 열 너비 설정
     col_widths = {
-        "A": 26,
-        "B": 18,
-        "C": 12,
-        "D": 12,
-        "E": 12,
-        "F": 22,
-        "G": 12,
-        "H": 14,
-        "I": 12,
+        "A": 26,  # 제품명
+        "B": 18,  # 제품 LOT
+        "C": 12,  # 전일재고
+        "D": 12,  # 생산량
+        "E": 12,  # 폐기량
+        "F": 22,  # 일부인 / 결재 / 작성자
+        "G": 12,  # 출고량 / 작성
+        "H": 14,  # 납품처 / 검토
+        "I": 12,  # 금일재고 / 승인
     }
     for col, w in col_widths.items():
         ws.column_dimensions[col].width = w
@@ -271,23 +276,19 @@ if uploaded_files:
     if st.button("🚀 통합 엑셀 파일 생성하기", type="primary"):
         wb = openpyxl.Workbook()
 
-        # UI 진행률 표시바 및 진행 상태 메시지
         progress_bar = st.progress(0)
         status_text = st.empty()
 
         for idx, file in enumerate(uploaded_files):
-            # 상태 안내 메시지
             status_text.text(
                 f"⏳ [{idx+1}/{total_files}] '{file.name}' 분석 및 엑셀 시트 생성 중..."
             )
 
-            # 확장자별 텍스트 추출
             if file.name.lower().endswith(".pdf"):
                 extracted_text = process_pdf(file)
             else:
                 extracted_text = process_image(file)
 
-            # 파싱 및 시트 작성
             parsed_data = parse_statement_text(
                 extracted_text, default_filename=file.name
             )
@@ -295,19 +296,16 @@ if uploaded_files:
                 wb, parsed_data, writer_name=writer_input, is_first=(idx == 0)
             )
 
-            # 진행률 업데이트
             progress_bar.progress((idx + 1) / total_files)
 
         status_text.success(
             f"🎉 총 {total_files}개의 거래명세서 변환이 완료되었습니다!"
         )
 
-        # 메모리 상에서 엑셀 파일 바이너리 생성
         output = io.BytesIO()
         wb.save(output)
         excel_bytes = output.getvalue()
 
-        # 다운로드 버튼 제공
         st.download_button(
             label=f"📥 통합 일일생산일보 ({total_files}개 시트) 엑셀 다운로드",
             data=excel_bytes,
