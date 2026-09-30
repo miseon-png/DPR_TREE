@@ -41,7 +41,7 @@ def process_image(image_file):
 
 
 def parse_statement_text(text, default_filename=""):
-    """거래명세서 텍스트에서 생산일자, 시트명, 품목 정보 파싱"""
+    """거래명세서 텍스트에서 생산일자, 시트명(일자만), 품목 정보 파싱"""
     # 날짜 패턴 검색 (예: 2026년 8월 31일 또는 2026-08-31)
     date_match = re.search(r"(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일", text)
     if not date_match:
@@ -50,12 +50,13 @@ def parse_statement_text(text, default_filename=""):
     if date_match:
         y, m, d = date_match.groups()
         date_str = f"{y}년 {int(m):02d}월 {int(d):02d}일 월요일"
-        sheet_name = f"{y[2:]}{int(m):02d}{int(d):02d}_생산일보"
+        # 💡 시트 이름을 '월' 없이 몇 일인지(예: '31일')로만 설정
+        sheet_name = f"{int(d)}일"
         lot_date = f"{y}{int(m):02d}{int(d):02d}"
     else:
         date_str = "2026년 08월 31일 월요일"
         clean_fname = re.sub(r"[^\w]", "", default_filename)
-        sheet_name = clean_fname[:15] if clean_fname else "생산일보"
+        sheet_name = clean_fname[:10] if clean_fname else "31일"
         lot_date = "20260831"
 
     # 전처리 품목 데이터 (원물 품목 자동 제외)
@@ -88,12 +89,20 @@ def parse_statement_text(text, default_filename=""):
 
 
 def add_report_sheet(wb, data, writer_name="이미선", is_first=False):
-    """엑셀 워크북에 개별 시트(가로 방향 + 상단 결재란 정렬 수정완료) 추가"""
+    """엑셀 워크북에 개별 시트(가로 방향 + 상단 결재란 완전 정렬) 추가"""
+
+    # 중복 시트명 처리 (예: 동일 일자 명세서가 2개 이상일 경우 '31일(1)' 형태로 자동 지정)
+    target_sheet_name = data["sheet_name"]
+    counter = 1
+    while target_sheet_name in wb.sheetnames:
+        target_sheet_name = f"{data['sheet_name']}({counter})"
+        counter += 1
+
     if is_first:
         ws = wb.active
-        ws.title = data["sheet_name"]
+        ws.title = target_sheet_name
     else:
-        ws = wb.create_sheet(title=data["sheet_name"])
+        ws = wb.create_sheet(title=target_sheet_name)
 
     # A4 가로(Landscape) 인쇄 설정
     ws.page_setup.orientation = ws.ORIENTATION_LANDSCAPE
@@ -117,7 +126,7 @@ def add_report_sheet(wb, data, writer_name="이미선", is_first=False):
     align_center = Alignment(horizontal="center", vertical="center")
     align_left = Alignment(horizontal="left", vertical="center")
 
-    # 병합 영역 테두리 적용 함수
+    # 테두리 일괄 적용 유틸리티 함수
     def apply_border(ws, cell_range):
         for row in ws[cell_range]:
             for cell in row:
