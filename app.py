@@ -13,7 +13,7 @@ st.set_page_config(
 )
 
 
-# EasyOCR 인공지능 모델 캐싱 로드 (초기 1회만 로딩하여 속도 최적화)
+# EasyOCR 인공지능 모델 캐싱 로드
 @st.cache_resource
 def load_ocr():
     return easyocr.Reader(["ko", "en"])
@@ -42,7 +42,6 @@ def process_image(image_file):
 
 def parse_statement_text(text, default_filename=""):
     """거래명세서 텍스트에서 생산일자, 시트명(일자만), 품목 정보 파싱"""
-    # 날짜 패턴 검색 (예: 2026년 8월 31일 또는 2026-08-31)
     date_match = re.search(r"(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일", text)
     if not date_match:
         date_match = re.search(r"(\d{4})[-.](\d{1,2})[-.](\d{1,2})", text)
@@ -50,7 +49,6 @@ def parse_statement_text(text, default_filename=""):
     if date_match:
         y, m, d = date_match.groups()
         date_str = f"{y}년 {int(m):02d}월 {int(d):02d}일 월요일"
-        # 💡 시트 이름을 '월' 없이 몇 일인지(예: '31일')로만 설정
         sheet_name = f"{int(d)}일"
         lot_date = f"{y}{int(m):02d}{int(d):02d}"
     else:
@@ -89,9 +87,8 @@ def parse_statement_text(text, default_filename=""):
 
 
 def add_report_sheet(wb, data, writer_name="이미선", is_first=False):
-    """엑셀 워크북에 개별 시트(가로 방향 + 상단 결재란 완전 정렬) 추가"""
+    """엑셀 워크북에 개별 시트 추가"""
 
-    # 중복 시트명 처리 (예: 동일 일자 명세서가 2개 이상일 경우 '31일(1)' 형태로 자동 지정)
     target_sheet_name = data["sheet_name"]
     counter = 1
     while target_sheet_name in wb.sheetnames:
@@ -126,17 +123,17 @@ def add_report_sheet(wb, data, writer_name="이미선", is_first=False):
     align_center = Alignment(horizontal="center", vertical="center")
     align_left = Alignment(horizontal="left", vertical="center")
 
-    # 테두리 일괄 적용 유틸리티 함수
     def apply_border(ws, cell_range):
         for row in ws[cell_range]:
             for cell in row:
                 cell.border = border_all
 
-    # 1) 제목 및 상단 결재란 (A~E열: 제목 / F열: 결재 / G,H,I열: 작성,검토,승인)
+    # 1) 제목 및 상단 결재란
     ws.merge_cells("A1:E2")
     ws["A1"] = "일일 생산일보"
     ws["A1"].font = font_title
-    ws["A1"].alignment = Alignment(horizontal="left", vertical="center")
+    # 💡 타이틀 가운데 정렬 적용 (horizontal="center")
+    ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
 
     ws.merge_cells("F1:F2")
     ws["F1"] = "결\n재"
@@ -159,9 +156,9 @@ def add_report_sheet(wb, data, writer_name="이미선", is_first=False):
 
     ws.row_dimensions[1].height = 18
     ws.row_dimensions[2].height = 36
-    ws.row_dimensions[3].height = 10  # 여백 행
+    ws.row_dimensions[3].height = 10
 
-    # 2) 기본 정보 (A~B열: 생산일자 / C~E열: 날짜값 / F열: 작성자 / G~I열: 작성자명)
+    # 2) 기본 정보
     ws.merge_cells("A4:B4")
     ws["A4"] = "생산일자"
     ws["A4"].font = font_bold
@@ -189,7 +186,7 @@ def add_report_sheet(wb, data, writer_name="이미선", is_first=False):
 
     ws.row_dimensions[4].height = 24
 
-    # 3) 헤더 작성 (5행: 대분류, 6행: 세부 항목)
+    # 3) 헤더 작성
     headers_top = [
         ("A5:B5", "제품정보"),
         ("C5:F5", "생산정보"),
@@ -248,15 +245,15 @@ def add_report_sheet(wb, data, writer_name="이미선", is_first=False):
 
     # 5) 가로 레이아웃 열 너비 설정
     col_widths = {
-        "A": 26,  # 제품명
-        "B": 18,  # 제품 LOT
-        "C": 12,  # 전일재고
-        "D": 12,  # 생산량
-        "E": 12,  # 폐기량
-        "F": 22,  # 일부인 / 결재 / 작성자
-        "G": 12,  # 출고량 / 작성
-        "H": 14,  # 납품처 / 검토
-        "I": 12,  # 금일재고 / 승인
+        "A": 26,
+        "B": 18,
+        "C": 12,
+        "D": 12,
+        "E": 12,
+        "F": 22,
+        "G": 12,
+        "H": 14,
+        "I": 12,
     }
     for col, w in col_widths.items():
         ws.column_dimensions[col].width = w
@@ -271,7 +268,6 @@ st.write(
 st.sidebar.header("⚙️ 기본 설정")
 writer_input = st.sidebar.text_input("작성자 이름", value="이미선")
 
-# 다중 파일 선택 업로더
 uploaded_files = st.file_uploader(
     "거래명세서 파일 선택 (30개 이상 다중 선택 가능)",
     type=["pdf", "png", "jpg", "jpeg"],
