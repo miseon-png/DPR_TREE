@@ -1,5 +1,7 @@
 streamlit
+easyocr
 openpyxl
 pdfplumber
-easyocr
-pillow
+Pillow
+pandas
+xlrd
