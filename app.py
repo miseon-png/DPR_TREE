@@ -258,10 +258,10 @@ def add_namusoop_sheet(wb, data, writer_name="이미선", is_first=False):
 
 
 # ==========================================
-# 2. 당근라페 월 생산일보 함수 모음 (수량 단위 EA 적용)
+# 2. 당근라페 월 생산일보 함수 모음 (품목명 정제: '곰곰 당근 라페 200g')
 # ==========================================
 def parse_carrot_excel(excel_file):
-    """전체 엑셀 입고 데이터 중 오직 '당근라페' 항목만 필터링 파싱"""
+    """전체 엑셀 입고 데이터 중 '당근라페' 항목 파싱 및 품목명 정제"""
     df = pd.read_excel(excel_file)
     items_data = []
     all_text = df.astype(str).to_string()
@@ -284,13 +284,14 @@ def parse_carrot_excel(excel_file):
         else:
             receipt_date = datetime(2026, 8, 31)
 
-    # 2. '당근라페' 수량(EA) 추출
+    # 2. '당근라페' / '당근 라페' 품목 검색 및 수량 추출
     for row_idx, row in df.iterrows():
         row_str = " ".join(row.astype(str).values)
-        if "당근라페" in row_str:
+        if re.search(r"당근\s*라페", row_str):
             for val in row.values:
                 if isinstance(val, (int, float)) and val > 0:
-                    items_data.append(("당근라페", int(val) if val.is_integer() else val))
+                    # 💡 품목명을 '곰곰 당근 라페 200g'으로 정리
+                    items_data.append(("곰곰 당근 라페 200g", int(val) if val.is_integer() else val))
                     break
 
     if not items_data:
@@ -319,7 +320,7 @@ def parse_carrot_excel(excel_file):
 
 
 def parse_carrot_text(text, default_filename=""):
-    """PDF / 이미지 텍스트 중 오직 '당근라페' 항목만 필터링 파싱"""
+    """PDF / 이미지 텍스트 중 '당근라페' 파싱 및 품목명 정제"""
     date_match = re.search(r"(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일", text)
     if not date_match:
         date_match = re.search(r"(\d{4})[-.](\d{1,2})[-.](\d{1,2})", text)
@@ -333,11 +334,12 @@ def parse_carrot_text(text, default_filename=""):
     items_data = []
     lines = text.split("\n")
     for line in lines:
-        if "당근라페" in line:
+        if re.search(r"당근\s*라페", line):
             numbers = re.findall(r"\d+(?:\.\d+)?", line)
             if numbers:
                 val = float(numbers[-1])
-                items_data.append(("당근라페", int(val) if val.is_integer() else val))
+                # 💡 품목명을 '곰곰 당근 라페 200g'으로 정리
+                items_data.append(("곰곰 당근 라페 200g", int(val) if val.is_integer() else val))
 
     if not items_data:
         return None
@@ -365,7 +367,7 @@ def parse_carrot_text(text, default_filename=""):
 
 
 def generate_carrot_monthly_report(parsed_data_list, writer_name="이미선"):
-    """당근라페 전용 월 생산일보 시트 생성 (단위: EA)"""
+    """당근라페 전용 월 생산일보 시트 생성 (단위: EA, 품목명 정제)"""
     valid_data = [d for d in parsed_data_list if d is not None]
 
     if not valid_data:
@@ -512,9 +514,9 @@ def generate_carrot_monthly_report(parsed_data_list, writer_name="이미선"):
             total_prod_qty += qty
             total_out_qty += qty
 
-            # 💡 단위 EA 표시 적용
             qty_str = f"{qty:,} EA" if isinstance(qty, int) else f"{qty} EA"
 
+            # 💡 p_name = "곰곰 당근 라페 200g"
             row_vals = [
                 (f"{p_name} ({data['date_str']})", align_left),
                 (data["lot_no"], align_center),
@@ -544,7 +546,6 @@ def generate_carrot_monthly_report(parsed_data_list, writer_name="이미선"):
     sum_label.alignment = align_center
     apply_border(ws, f"A{current_row}:C{current_row}")
 
-    # 💡 총 생산량 / 출고량 EA 단위 표시
     prod_sum_str = (
         f"{int(total_prod_qty):,} EA"
         if total_prod_qty.is_integer()
@@ -587,7 +588,7 @@ def generate_carrot_monthly_report(parsed_data_list, writer_name="이미선"):
         cell_tmp.border = border_all
 
     col_widths = {
-        "A": 30,
+        "A": 32,
         "B": 18,
         "C": 12,
         "D": 12,
@@ -678,11 +679,11 @@ if app_mode == "📋 나무숲 일일 생산일보":
             )
 
 
-# --- [메뉴 2] 당근라페 월 생산일보 모드 (EA 단위) ---
+# --- [메뉴 2] 당근라페 월 생산일보 모드 ---
 else:
     st.title("🥕 당근라페 월 생산일보 자동 변환기")
     st.write(
-        "입고 명세서 파일(**Excel**, PDF, 이미지)에서 **'당근라페' 품목만 자동으로 골라내어 생산일(D-1) 기준 월 생산일보(단위: EA)**를 만듭니다."
+        "입고 명세서 파일(**Excel**, PDF, 이미지)에서 당근라페 품목을 추출하여 **'곰곰 당근 라페 200g' 정밀 명칭 및 EA 단위로 월 생산일보**를 만듭니다."
     )
 
     uploaded_files = st.file_uploader(
@@ -725,7 +726,7 @@ else:
                 parsed_data_list.append(parsed_data)
                 progress_bar.progress((idx + 1) / total_files)
 
-            status_text.text("📊 당근라페 EA 단위 집계 및 엑셀 구성 중...")
+            status_text.text("📊 '곰곰 당근 라페 200g' 정제 및 엑셀 구성 중...")
 
             wb, count = generate_carrot_monthly_report(
                 parsed_data_list, writer_name=writer_input
