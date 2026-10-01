@@ -1,20 +1,22 @@
 import io
 import re
 from datetime import datetime, timedelta
+from collections import Counter
 import easyocr
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+import pandas as pd
 import pdfplumber
 from PIL import Image
 import streamlit as st
 
-# Streamlit 기본 레이아웃 설정 (넓은 화면)
+# Streamlit 기본 레이아웃 설정
 st.set_page_config(
     page_title="통합 생산일보 자동 변환기", layout="wide", page_icon="📋"
 )
 
 
-# EasyOCR 인공지능 모델 캐싱 로드 (공통 사용)
+# EasyOCR 인공지능 모델 캐싱 로드
 @st.cache_resource
 def load_ocr():
     return easyocr.Reader(["ko", "en"])
@@ -256,10 +258,68 @@ def add_namusoop_sheet(wb, data, writer_name="이미선", is_first=False):
 
 
 # ==========================================
-# 2. 당근라페 월 생산일보 함수 모음
+# 2. 당근라페 월 생산일보 함수 모음 (수량 단위 EA 적용)
 # ==========================================
+def parse_carrot_excel(excel_file):
+    """전체 엑셀 입고 데이터 중 오직 '당근라페' 항목만 필터링 파싱"""
+    df = pd.read_excel(excel_file)
+    items_data = []
+    all_text = df.astype(str).to_string()
+
+    # 1. 입고일 추출
+    date_match = re.search(r"(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일", all_text)
+    if not date_match:
+        date_match = re.search(r"(\d{4})[-.](\d{1,2})[-.](\d{1,2})", all_text)
+
+    if date_match:
+        y, m, d = map(int, date_match.groups())
+        receipt_date = datetime(y, m, d)
+    else:
+        fname_match = re.search(
+            r"(\d{4})[-.]?(\d{2})[-.]?(\d{2})", excel_file.name
+        )
+        if fname_match:
+            y, m, d = map(int, fname_match.groups())
+            receipt_date = datetime(y, m, d)
+        else:
+            receipt_date = datetime(2026, 8, 31)
+
+    # 2. '당근라페' 수량(EA) 추출
+    for row_idx, row in df.iterrows():
+        row_str = " ".join(row.astype(str).values)
+        if "당근라페" in row_str:
+            for val in row.values:
+                if isinstance(val, (int, float)) and val > 0:
+                    items_data.append(("당근라페", int(val) if val.is_integer() else val))
+                    break
+
+    if not items_data:
+        return None
+
+    production_date = receipt_date - timedelta(days=1)
+    p_y, p_m, p_d = (
+        production_date.year,
+        production_date.month,
+        production_date.day,
+    )
+
+    year_month = f"{p_y}년 {p_m:02d}월"
+    date_sort_key = f"{p_y:04d}{p_m:02d}{p_d:02d}"
+    prod_date_str = f"{p_y}년 {p_m:02d}월 {p_d:02d}일"
+
+    return {
+        "year_month": year_month,
+        "date_sort_key": date_sort_key,
+        "date_str": prod_date_str,
+        "lot_no": f"{date_sort_key} - B02",
+        "mfg_date": f"제조) {prod_date_str}",
+        "client_name": "나무숲",
+        "items": items_data,
+    }
+
+
 def parse_carrot_text(text, default_filename=""):
-    """당근라페 입고 명세서 파싱 (입고일 D-1 = 생산일 계산)"""
+    """PDF / 이미지 텍스트 중 오직 '당근라페' 항목만 필터링 파싱"""
     date_match = re.search(r"(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일", text)
     if not date_match:
         date_match = re.search(r"(\d{4})[-.](\d{1,2})[-.](\d{1,2})", text)
@@ -270,28 +330,31 @@ def parse_carrot_text(text, default_filename=""):
     else:
         receipt_date = datetime(2026, 8, 31)
 
-    production_date = receipt_date - timedelta(days=1)
-
-    p_y = production_date.year
-    p_m = production_date.month
-    p_d = production_date.day
-
-    date_sort_key = f"{p_y:04d}{p_m:02d}{p_d:02d}"
-    prod_date_str = f"{p_y}년 {p_m:02d}월 {p_d:02d}일"
-
     items_data = []
     lines = text.split("\n")
     for line in lines:
         if "당근라페" in line:
             numbers = re.findall(r"\d+(?:\.\d+)?", line)
             if numbers:
-                qty = float(numbers[-1])
-                items_data.append(("당근라페", qty))
+                val = float(numbers[-1])
+                items_data.append(("당근라페", int(val) if val.is_integer() else val))
 
     if not items_data:
-        items_data = [("당근라페", 25.0)]
+        return None
+
+    production_date = receipt_date - timedelta(days=1)
+    p_y, p_m, p_d = (
+        production_date.year,
+        production_date.month,
+        production_date.day,
+    )
+
+    year_month = f"{p_y}년 {p_m:02d}월"
+    date_sort_key = f"{p_y:04d}{p_m:02d}{p_d:02d}"
+    prod_date_str = f"{p_y}년 {p_m:02d}월 {p_d:02d}일"
 
     return {
+        "year_month": year_month,
         "date_sort_key": date_sort_key,
         "date_str": prod_date_str,
         "lot_no": f"{date_sort_key} - B02",
@@ -302,17 +365,27 @@ def parse_carrot_text(text, default_filename=""):
 
 
 def generate_carrot_monthly_report(parsed_data_list, writer_name="이미선"):
-    """당근라페 월 생산일보 단일 시트 생성"""
+    """당근라페 전용 월 생산일보 시트 생성 (단위: EA)"""
+    valid_data = [d for d in parsed_data_list if d is not None]
+
+    if not valid_data:
+        return None, 0
+
+    month_counts = Counter(d["year_month"] for d in valid_data)
+    target_year_month = month_counts.most_common(1)[0][0]
+
+    filtered_data = [
+        d for d in valid_data if d["year_month"] == target_year_month
+    ]
+    filtered_data.sort(key=lambda x: x["date_sort_key"])
+
     wb = openpyxl.Workbook()
     ws = wb.active
 
-    parsed_data_list.sort(key=lambda x: x["date_sort_key"])
+    first_date = filtered_data[0]["date_str"]
+    last_date = filtered_data[-1]["date_str"]
 
-    first_date = parsed_data_list[0]["date_str"]
-    last_date = parsed_data_list[-1]["date_str"]
-    year_month = first_date[:8]
-
-    ws.title = f"{year_month} 생산일보"
+    ws.title = f"{target_year_month} 생산일보"
 
     ws.page_setup.orientation = ws.ORIENTATION_LANDSCAPE
     ws.page_setup.paperSize = ws.PAPERSIZE_A4
@@ -343,7 +416,7 @@ def generate_carrot_monthly_report(parsed_data_list, writer_name="이미선"):
                 cell.border = border_all
 
     ws.merge_cells("A1:E2")
-    ws["A1"] = f"{year_month} 당근라페 월 생산일보"
+    ws["A1"] = f"{target_year_month} 당근라페 월 생산일보"
     ws["A1"].font = font_title
     ws["A1"].alignment = align_center
 
@@ -434,21 +507,24 @@ def generate_carrot_monthly_report(parsed_data_list, writer_name="이미선"):
     total_prod_qty = 0.0
     total_out_qty = 0.0
 
-    for data in parsed_data_list:
+    for data in filtered_data:
         for p_name, qty in data["items"]:
             total_prod_qty += qty
             total_out_qty += qty
 
+            # 💡 단위 EA 표시 적용
+            qty_str = f"{qty:,} EA" if isinstance(qty, int) else f"{qty} EA"
+
             row_vals = [
                 (f"{p_name} ({data['date_str']})", align_left),
                 (data["lot_no"], align_center),
-                ("0 Kg", align_center),
-                (f"{qty} Kg", align_center),
-                ("0 Kg", align_center),
+                ("0 EA", align_center),
+                (qty_str, align_center),
+                ("0 EA", align_center),
                 (data["mfg_date"], align_center),
-                (f"{qty} Kg", align_center),
+                (qty_str, align_center),
                 (data["client_name"], align_center),
-                ("0 Kg", align_center),
+                ("0 EA", align_center),
             ]
 
             for c_idx, (val, align) in enumerate(row_vals, start=1):
@@ -468,8 +544,20 @@ def generate_carrot_monthly_report(parsed_data_list, writer_name="이미선"):
     sum_label.alignment = align_center
     apply_border(ws, f"A{current_row}:C{current_row}")
 
+    # 💡 총 생산량 / 출고량 EA 단위 표시
+    prod_sum_str = (
+        f"{int(total_prod_qty):,} EA"
+        if total_prod_qty.is_integer()
+        else f"{total_prod_qty:.1f} EA"
+    )
+    out_sum_str = (
+        f"{int(total_out_qty):,} EA"
+        if total_out_qty.is_integer()
+        else f"{total_out_qty:.1f} EA"
+    )
+
     cell_prod_sum = ws.cell(row=current_row, column=4)
-    cell_prod_sum.value = f"{total_prod_qty:.1f} Kg"
+    cell_prod_sum.value = prod_sum_str
     cell_prod_sum.font = font_bold
     cell_prod_sum.fill = fill_total
     cell_prod_sum.alignment = align_center
@@ -484,7 +572,7 @@ def generate_carrot_monthly_report(parsed_data_list, writer_name="이미선"):
         cell_tmp.border = border_all
 
     cell_out_sum = ws.cell(row=current_row, column=7)
-    cell_out_sum.value = f"{total_out_qty:.1f} Kg"
+    cell_out_sum.value = out_sum_str
     cell_out_sum.font = font_bold
     cell_out_sum.fill = fill_total
     cell_out_sum.alignment = align_center
@@ -512,7 +600,7 @@ def generate_carrot_monthly_report(parsed_data_list, writer_name="이미선"):
     for col, w in col_widths.items():
         ws.column_dimensions[col].width = w
 
-    return wb
+    return wb, len(filtered_data)
 
 
 # ==========================================
@@ -590,16 +678,16 @@ if app_mode == "📋 나무숲 일일 생산일보":
             )
 
 
-# --- [메뉴 2] 당근라페 월 생산일보 모드 ---
+# --- [메뉴 2] 당근라페 월 생산일보 모드 (EA 단위) ---
 else:
     st.title("🥕 당근라페 월 생산일보 자동 변환기")
     st.write(
-        "입고 거래명세서 파일(PDF, 이미지)을 올리면 **입고일 하루 전날(D-1)을 생산일로 계산하여 하나의 시트에 월 누적 표** 형태로 만듭니다."
+        "입고 명세서 파일(**Excel**, PDF, 이미지)에서 **'당근라페' 품목만 자동으로 골라내어 생산일(D-1) 기준 월 생산일보(단위: EA)**를 만듭니다."
     )
 
     uploaded_files = st.file_uploader(
-        "당근라페 입고 명세서 파일 선택",
-        type=["pdf", "png", "jpg", "jpeg"],
+        "당근라페 입고 명세서 파일 선택 (Excel, PDF, 이미지)",
+        type=["xlsx", "xls", "pdf", "png", "jpg", "jpeg"],
         accept_multiple_files=True,
         key="carrot_files",
     )
@@ -619,33 +707,46 @@ else:
                     f"⏳ [{idx+1}/{total_files}] '{file.name}' 분석 중..."
                 )
 
-                if file.name.lower().endswith(".pdf"):
+                fname_lower = file.name.lower()
+
+                if fname_lower.endswith((".xlsx", ".xls")):
+                    parsed_data = parse_carrot_excel(file)
+                elif fname_lower.endswith(".pdf"):
                     extracted_text = process_pdf(file)
+                    parsed_data = parse_carrot_text(
+                        extracted_text, default_filename=file.name
+                    )
                 else:
                     extracted_text = process_image(file)
+                    parsed_data = parse_carrot_text(
+                        extracted_text, default_filename=file.name
+                    )
 
-                parsed_data = parse_carrot_text(
-                    extracted_text, default_filename=file.name
-                )
                 parsed_data_list.append(parsed_data)
-
                 progress_bar.progress((idx + 1) / total_files)
 
-            status_text.text("📊 월 생산일보 엑셀 파일 구성 중...")
+            status_text.text("📊 당근라페 EA 단위 집계 및 엑셀 구성 중...")
 
-            wb = generate_carrot_monthly_report(
+            wb, count = generate_carrot_monthly_report(
                 parsed_data_list, writer_name=writer_input
             )
 
-            status_text.success("🎉 당근라페 월 생산일보 변환이 완료되었습니다!")
+            if wb is not None:
+                status_text.success(
+                    f"🎉 당근라페 월 생산일보 변환 완료! (총 {total_files}개 파일 중 당근라페 생산 {count}건 반영)"
+                )
 
-            output = io.BytesIO()
-            wb.save(output)
-            excel_bytes = output.getvalue()
+                output = io.BytesIO()
+                wb.save(output)
+                excel_bytes = output.getvalue()
 
-            st.download_button(
-                label="📥 당근라페 월 생산일보 엑셀 다운로드",
-                data=excel_bytes,
-                file_name="당근라페_월_생산일보.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+                st.download_button(
+                    label="📥 당근라페 월 생산일보 엑셀 다운로드",
+                    data=excel_bytes,
+                    file_name="당근라페_월_생산일보.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            else:
+                status_text.error(
+                    "⚠️ 업로드된 파일에서 '당근라페' 품목 데이터를 찾을 수 없습니다."
+                )
