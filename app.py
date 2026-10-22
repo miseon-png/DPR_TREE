@@ -256,7 +256,7 @@ def add_namusoop_sheet(wb, data, writer_name="이미선", is_first=False):
 # 2. 당근라페 월 생산일보 함수 모음 (쿠팡 엑셀 정밀 집계)
 # ==========================================
 def parse_carrot_excel(excel_file):
-    """쿠팡 엑셀 데이터 파싱: '당근라페' 추출 및 생산일(입고일 - 1일)별 수량 합산"""
+    """쿠팡 엑셀 데이터 파싱: '당근라페' 200g, 400g 구분 및 생산일별 수량 합산"""
     df = pd.read_excel(excel_file)
 
     # 1. SKU명에서 '당근라페' 항목 검색
@@ -273,12 +273,13 @@ def parse_carrot_excel(excel_file):
     # 수량 숫자로 정형화
     carrot_df["수량"] = pd.to_numeric(carrot_df["수량"], errors="coerce").fillna(0)
 
-    # 3. 동일 생산일자 기준 수량 통합 (Group By)
-    grouped = carrot_df.groupby("생산일")["수량"].sum().reset_index()
+    # 3. 동일 생산일자 + SKU명 기준 수량 통합 (Group By)
+    grouped = carrot_df.groupby(["생산일", "SKU명"])["수량"].sum().reset_index()
 
     parsed_records = []
     for _, row in grouped.iterrows():
         p_date = row["생산일"]
+        raw_sku = str(row["SKU명"])
         qty = int(row["수량"]) if float(row["수량"]).is_integer() else row["수량"]
 
         if qty <= 0:
@@ -295,17 +296,23 @@ def parse_carrot_excel(excel_file):
         date_short = f"{p_m:02d}월 {p_d:02d}일"
         exp_date_str = f"소비) {exp_date.year}년 {exp_date.month:02d}월 {exp_date.day:02d}일"
 
+        # 용량에 따른 동적 제품명 할당
+        if "400g" in raw_sku:
+            item_name = "곰곰 당근 라페 400g"
+        else:
+            item_name = "곰곰 당근 라페 200g"
+
         parsed_records.append(
             {
                 "year_month": year_month,
                 "date_sort_key": date_sort_key,
                 "date_str": date_str,
                 "date_short": date_short,
-                "lot_no": f"CR {date_sort_key} - B02",  # 이미지[cite: 2] 서식과 정확히 동일
-                "exp_date_str": exp_date_str,          # 이미지[cite: 2] 소비기한 서식
-                "client_name": "쿠팡",                 # 이미지[cite: 2] 납품처
+                "lot_no": f"CR {date_sort_key} - B02", 
+                "exp_date_str": exp_date_str,          
+                "client_name": "쿠팡",                 
                 "qty": qty,
-                "item_name": "곰곰 당근 라페 200g",
+                "item_name": item_name,
             }
         )
 
@@ -313,7 +320,6 @@ def parse_carrot_excel(excel_file):
 
 
 def generate_carrot_monthly_report(parsed_records, writer_name="이미선"):
-    """이미지[cite: 2] 샘플과 100% 동일한 엑셀 생성"""
     if not parsed_records:
         return None, 0
 
@@ -324,12 +330,12 @@ def generate_carrot_monthly_report(parsed_records, writer_name="이미선"):
     filtered_data = [
         d for d in parsed_records if d["year_month"] == target_year_month
     ]
-    filtered_data.sort(key=lambda x: x["date_sort_key"])
+    # 날짜, 그리고 제품명(200g, 400g 순)으로 정렬
+    filtered_data.sort(key=lambda x: (x["date_sort_key"], x["item_name"]))
 
     wb = openpyxl.Workbook()
     ws = wb.active
 
-    # 대상 월의 전체 생산 기간 (예: 2026년 08월 01일 ~ 2026년 08월 31일)
     y_str, m_str = target_year_month.split(" ")
     y_num = int(y_str.replace("년", ""))
     m_num = int(m_str.replace("월", ""))
@@ -369,7 +375,6 @@ def generate_carrot_monthly_report(parsed_records, writer_name="이미선"):
             for cell in row:
                 cell.border = border_all
 
-    # 1) 상단 타이틀 및 결재란 (10개 열 기준)
     ws.merge_cells("A1:F2")
     ws["A1"] = f"{target_year_month} 당근라페 월 생산일보"
     ws["A1"].font = font_title
@@ -398,7 +403,6 @@ def generate_carrot_monthly_report(parsed_records, writer_name="이미선"):
     ws.row_dimensions[2].height = 36
     ws.row_dimensions[3].height = 10
 
-    # 2) 상단 정보란 (생산 기간 / 작성자)
     ws.merge_cells("A4:C4")
     ws["A4"] = "생산 기간"
     ws["A4"].font = font_bold
@@ -426,7 +430,6 @@ def generate_carrot_monthly_report(parsed_records, writer_name="이미선"):
 
     ws.row_dimensions[4].height = 24
 
-    # 3) 상단 그룹 헤더 (제품정보 / 생산정보 / 납품 및 재고)
     ws.merge_cells("A5:C5")
     ws["A5"] = "제품정보"
     ws["A5"].font = font_bold
@@ -448,18 +451,17 @@ def generate_carrot_monthly_report(parsed_records, writer_name="이미선"):
     ws["H5"].alignment = align_center
     apply_border(ws, "H5:J5")
 
-    # 4) 세부 헤더 (이미지[cite: 2] 샘플 컬럼과 정확히 1:1 매칭)
     headers_detail = [
-        "제품명",      # A열 (08월 02일)
-        "제품명",      # B열 (곰곰 당근 라페 200g)
-        "제품 LOT",    # C열 (CR 20260802 - B02)
-        "전일재고",    # D열
-        "생산량",      # E열
-        "폐기량",      # F열
-        "일부인",      # G열 (소비) 2026년 08월 06일)
-        "출고량",      # H열
-        "납품처",      # I열 (쿠팡)
-        "금일재고",    # J열
+        "제품명",      
+        "제품명",      
+        "제품 LOT",    
+        "전일재고",    
+        "생산량",      
+        "폐기량",      
+        "일부인",      
+        "출고량",      
+        "납품처",      
+        "금일재고",    
     ]
     for idx, text in enumerate(headers_detail, start=1):
         cell = ws.cell(row=6, column=idx)
@@ -469,7 +471,6 @@ def generate_carrot_monthly_report(parsed_records, writer_name="이미선"):
         cell.alignment = align_center
         cell.border = border_all
 
-    # 5) 데이터 행 구성
     current_row = 7
     total_prod_qty = 0
 
@@ -479,16 +480,16 @@ def generate_carrot_monthly_report(parsed_records, writer_name="이미선"):
         qty_str = f"{qty:,}EA"
 
         row_vals = [
-            (data["date_short"], align_center),  # A열: 날짜 (08월 02일)
-            (data["item_name"], align_left),      # B열: 품목명 (곰곰 당근 라페 200g)
-            (data["lot_no"], align_center),       # C열: LOT (CR 20260802 - B02)
-            ("0 EA", align_center),               # D열: 전일재고
-            (qty_str, align_center),              # E열: 생산량
-            ("0 EA", align_center),               # F열: 폐기량
-            (data["exp_date_str"], align_center), # G열: 일부인
-            (qty_str, align_center),              # H열: 출고량
-            (data["client_name"], align_center),  # I열: 납품처 (쿠팡)
-            ("0 EA", align_center),               # J열: 금일재고
+            (data["date_short"], align_center),  
+            (data["item_name"], align_left),      
+            (data["lot_no"], align_center),       
+            ("0 EA", align_center),               
+            (qty_str, align_center),              
+            ("0 EA", align_center),               
+            (data["exp_date_str"], align_center), 
+            (qty_str, align_center),              
+            (data["client_name"], align_center),  
+            ("0 EA", align_center),               
         ]
 
         for c_idx, (val, align) in enumerate(row_vals, start=1):
@@ -500,7 +501,6 @@ def generate_carrot_monthly_report(parsed_records, writer_name="이미선"):
 
         current_row += 1
 
-    # 6) 월 누적 합계 행
     ws.merge_cells(f"A{current_row}:D{current_row}")
     sum_label = ws.cell(row=current_row, column=1)
     sum_label.value = "월 누적 합계"
@@ -541,7 +541,6 @@ def generate_carrot_monthly_report(parsed_records, writer_name="이미선"):
         cell_tmp.alignment = align_center
         cell_tmp.border = border_all
 
-    # 각 열 너비 설정
     col_widths = {
         "A": 12,
         "B": 24,
@@ -693,5 +692,5 @@ else:
                 )
             else:
                 status_text.error(
-                    "⚠️️ 업로드된 엑셀 파일에서 '당근라페' 입고 데이터를 찾을 수 없습니다."
+                    "⚠ 업로드된 엑셀 파일에서 '당근라페' 입고 데이터를 찾을 수 없습니다."
                 )
