@@ -54,9 +54,7 @@ def clean_item_name(name):
     name = re.sub(r"\d{1,2}월\s*\d{1,2}일", "", name)
 
     # 2. 단위 표기만 제거 (규격인 3*3, 2*2 등은 보존)
-    # 팩, 박스, box, ea, 봉, 입 등의 단위 키워드 제거
     name = re.sub(r"(?:\b|\s)(?:팩|박스|box|ea|봉|입)(?:\b|\s|$)", " ", name, flags=re.IGNORECASE)
-    # 중량 단위 (숫자+kg/g 형태 등) 제거
     name = re.sub(r"\b\d+(?:\.\d+)?\s*(?:kg|g)\b", "", name, flags=re.IGNORECASE)
 
     # 3. 괄호 안에 들어간 단위만 제거 (예: (팩), [box] 등. (3*3) 같은 규격 괄호는 보존)
@@ -389,7 +387,15 @@ def generate_carrot_monthly_report(parsed_records, writer_name="이미선"):
     filtered_data = [
         d for d in parsed_records if d["year_month"] == target_year_month
     ]
-    filtered_data.sort(key=lambda x: (x["date_sort_key"], x["item_name"]))
+
+    # [핵심 변경] 1순위: 200g이 0, 400g이 1로 배치되어 200g 그룹이 먼저 오게 설정
+    #              2순위: 날짜 오름차순(1일 ~ 말일)
+    filtered_data.sort(
+        key=lambda x: (
+            0 if "200g" in x["item_name"] else 1,
+            x["date_sort_key"],
+        )
+    )
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -508,7 +514,7 @@ def generate_carrot_monthly_report(parsed_records, writer_name="이미선"):
     apply_border(ws, "H5:J5")
 
     headers_detail = [
-        "제품명",
+        "생산일",
         "제품명",
         "제품 LOT",
         "전일재고",
