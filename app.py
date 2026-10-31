@@ -39,20 +39,28 @@ def process_image(image_file):
     img_byte_arr = io.BytesIO()
     image.save(img_byte_arr, format=image.format if image.format else "PNG")
     results = reader.readtext(img_byte_arr.getvalue(), detail=0)
-    return " ".join(results)
+    return "\n".join(results)
 
 
 # ==========================================
 # 1. 나무숲 일일 생산일보 함수 모음
 # ==========================================
 def parse_namusoop_text(text, default_filename=""):
+    """
+    텍스트에서 날짜, 원물을 제외한 완제품 목록 및 거래량(수량)을 동적으로 추출합니다.
+    """
+    # 1. 일자 파싱
     date_match = re.search(r"(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일", text)
     if not date_match:
         date_match = re.search(r"(\d{4})[-.](\d{1,2})[-.](\d{1,2})", text)
 
+    weekday_names = ["월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일"]
+
     if date_match:
         y, m, d = date_match.groups()
-        date_str = f"{y}년 {int(m):02d}월 {int(d):02d}일 월요일"
+        dt = datetime(int(y), int(m), int(d))
+        weekday = weekday_names[dt.weekday()]
+        date_str = f"{y}년 {int(m):02d}월 {int(d):02d}일 {weekday}"
         sheet_name = f"{int(d)}일"
         lot_date = f"{y}{int(m):02d}{int(d):02d}"
     else:
@@ -61,23 +69,44 @@ def parse_namusoop_text(text, default_filename=""):
         sheet_name = clean_fname[:10] if clean_fname else "31일"
         lot_date = "20260831"
 
-    items_data = [
-        ("유러피안 샐러드", 141.4),
-        ("오크헤드 유러피안 샐러드", 12.0),
-        ("개별)카이피라", 10.5),
-        ("개별)프릴아이스", 15.0),
-        ("개별)버터헤드", 13.2),
-        ("개별)로메인", 13.6),
-        ("개별)치커리", 18.5),
-        ("개별)적근대", 10.0),
-        ("개별)케일", 8.7),
-        ("개별)로메인(3*3)", 9.5),
-        ("개별)적근대(3*3)", 15.2),
-        ("개별)케일(3*3)", 5.3),
-        ("개별)적근대(2*2)", 1.9),
-        ("개별)케일(2*2)", 1.8),
-        ("개별)치커리(4)", 8.3),
-    ]
+    # 2. 제외할 원물 키워드 및 시스템 헤더 단어 목록
+    RAW_EXCLUDE_KEYWORDS = ["원물", "원재료", "벌크", "입고", "단가", "공급가액", "부가세", "합계", "비고"]
+
+    items_data = []
+    lines = text.split("\n")
+
+    for line in lines:
+        line_clean = line.strip()
+        if not line_clean:
+            continue
+
+        # 원물 키워드 또는 표 헤더 라인은 제외
+        if any(keyword in line_clean for keyword in RAW_EXCLUDE_KEYWORDS):
+            continue
+
+        # 패턴: 제품명 + 수량 (정수 또는 소수점 형태 + 선택적 단위 kg/Kg/EA)
+        match = re.search(
+            r"([가-힣A-Za-z0-9\(\)\*\s_~-]+?)\s+([\d,]+(?:\.\d+)?)\s*(?:kg|Kg|EA|ea|개)?(?:\s+|$)",
+            line_clean,
+        )
+        if match:
+            item_name = match.group(1).strip()
+            qty_str = match.group(2).replace(",", "")
+
+            # 불필요한 번호나 1글자 노이즈 제거
+            if len(item_name) <= 1 or item_name.isdigit():
+                continue
+
+            try:
+                qty = float(qty_str)
+                if qty > 0:
+                    items_data.append((item_name, qty))
+            except ValueError:
+                continue
+
+    # 동적 추출 데이터가 없을 경우 기본 안내 행 처리
+    if not items_data:
+        items_data = [("데이터 파싱 실패 (서식 확인 필요)", 0.0)]
 
     return {
         "sheet_name": sheet_name,
@@ -256,24 +285,19 @@ def add_namusoop_sheet(wb, data, writer_name="이미선", is_first=False):
 # 2. 당근라페 월 생산일보 함수 모음 (쿠팡 엑셀 정밀 집계)
 # ==========================================
 def parse_carrot_excel(excel_file):
-    """쿠팡 엑셀 데이터 파싱: '당근라페' 200g, 400g 구분 및 생산일별 수량 합산"""
     df = pd.read_excel(excel_file)
 
-    # 1. SKU명에서 '당근라페' 항목 검색
-    carrot_df = df[df["SKU명"].astype(str).str.contains("당근\s*라페", regex=True)].copy()
+    carrot_df = df[df["SKU명"].astype(str).str.contains(r"당근\s*라페", regex=True)].copy()
 
     if carrot_df.empty:
         return []
 
-    # 2. 입고일 및 생산일(입고일 - 1일) 연산
     carrot_df["입고일시"] = pd.to_datetime(carrot_df["입고/반출시각"])
     carrot_df["입고일"] = carrot_df["입고일시"].dt.date
     carrot_df["생산일"] = carrot_df["입고일"].apply(lambda x: x - timedelta(days=1))
 
-    # 수량 숫자로 정형화
     carrot_df["수량"] = pd.to_numeric(carrot_df["수량"], errors="coerce").fillna(0)
 
-    # 3. 동일 생산일자 + SKU명 기준 수량 통합 (Group By)
     grouped = carrot_df.groupby(["생산일", "SKU명"])["수량"].sum().reset_index()
 
     parsed_records = []
@@ -286,8 +310,6 @@ def parse_carrot_excel(excel_file):
             continue
 
         p_y, p_m, p_d = p_date.year, p_date.month, p_date.day
-
-        # 소비기한 (+4일)
         exp_date = p_date + timedelta(days=4)
 
         year_month = f"{p_y}년 {p_m:02d}월"
@@ -296,7 +318,6 @@ def parse_carrot_excel(excel_file):
         date_short = f"{p_m:02d}월 {p_d:02d}일"
         exp_date_str = f"소비) {exp_date.year}년 {exp_date.month:02d}월 {exp_date.day:02d}일"
 
-        # 용량에 따른 동적 제품명 할당
         if "400g" in raw_sku:
             item_name = "곰곰 당근 라페 400g"
         else:
@@ -308,9 +329,9 @@ def parse_carrot_excel(excel_file):
                 "date_sort_key": date_sort_key,
                 "date_str": date_str,
                 "date_short": date_short,
-                "lot_no": f"CR {date_sort_key} - B02", 
-                "exp_date_str": exp_date_str,          
-                "client_name": "쿠팡",                 
+                "lot_no": f"CR {date_sort_key} - B02",
+                "exp_date_str": exp_date_str,
+                "client_name": "쿠팡",
                 "qty": qty,
                 "item_name": item_name,
             }
@@ -323,14 +344,12 @@ def generate_carrot_monthly_report(parsed_records, writer_name="이미선"):
     if not parsed_records:
         return None, 0
 
-    # 가장 비중이 높은 달(월) 추출
     month_counts = Counter(d["year_month"] for d in parsed_records)
     target_year_month = month_counts.most_common(1)[0][0]
 
     filtered_data = [
         d for d in parsed_records if d["year_month"] == target_year_month
     ]
-    # 날짜, 그리고 제품명(200g, 400g 순)으로 정렬
     filtered_data.sort(key=lambda x: (x["date_sort_key"], x["item_name"]))
 
     wb = openpyxl.Workbook()
@@ -339,17 +358,15 @@ def generate_carrot_monthly_report(parsed_records, writer_name="이미선"):
     y_str, m_str = target_year_month.split(" ")
     y_num = int(y_str.replace("년", ""))
     m_num = int(m_str.replace("월", ""))
-    
+
     start_period = f"{y_num}년 {m_num:02d}월 01일"
     end_period = f"{y_num}년 {m_num:02d}월 31일"
 
     ws.title = f"{target_year_month} 생산일보"
 
-    # A4 가로 인쇄 설정
     ws.page_setup.orientation = ws.ORIENTATION_LANDSCAPE
     ws.page_setup.paperSize = ws.PAPERSIZE_A4
 
-    # 스타일 정의
     font_title = Font(name="맑은 고딕", size=18, bold=True)
     font_bold = Font(name="맑은 고딕", size=10, bold=True)
     font_regular = Font(name="맑은 고딕", size=10)
@@ -452,16 +469,16 @@ def generate_carrot_monthly_report(parsed_records, writer_name="이미선"):
     apply_border(ws, "H5:J5")
 
     headers_detail = [
-        "제품명",      
-        "제품명",      
-        "제품 LOT",    
-        "전일재고",    
-        "생산량",      
-        "폐기량",      
-        "일부인",      
-        "출고량",      
-        "납품처",      
-        "금일재고",    
+        "제품명",
+        "제품명",
+        "제품 LOT",
+        "전일재고",
+        "생산량",
+        "폐기량",
+        "일부인",
+        "출고량",
+        "납품처",
+        "금일재고",
     ]
     for idx, text in enumerate(headers_detail, start=1):
         cell = ws.cell(row=6, column=idx)
@@ -480,16 +497,16 @@ def generate_carrot_monthly_report(parsed_records, writer_name="이미선"):
         qty_str = f"{qty:,}EA"
 
         row_vals = [
-            (data["date_short"], align_center),  
-            (data["item_name"], align_left),      
-            (data["lot_no"], align_center),       
-            ("0 EA", align_center),               
-            (qty_str, align_center),              
-            ("0 EA", align_center),               
-            (data["exp_date_str"], align_center), 
-            (qty_str, align_center),              
-            (data["client_name"], align_center),  
-            ("0 EA", align_center),               
+            (data["date_short"], align_center),
+            (data["item_name"], align_left),
+            (data["lot_no"], align_center),
+            ("0 EA", align_center),
+            (qty_str, align_center),
+            ("0 EA", align_center),
+            (data["exp_date_str"], align_center),
+            (qty_str, align_center),
+            (data["client_name"], align_center),
+            ("0 EA", align_center),
         ]
 
         for c_idx, (val, align) in enumerate(row_vals, start=1):
