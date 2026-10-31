@@ -42,13 +42,40 @@ def process_image(image_file):
     return "\n".join(results)
 
 
+def clean_item_name(name):
+    """
+    제품명에서 날짜와 단위('팩', 'kg' 등)는 제거하고 '3*3' 등의 규격은 그대로 유지합니다.
+    예: '전처리 로메인 3*3 팩 2026-10-04' -> '전처리 로메인 3*3'
+    예: '전처리 유러피안 믹스 팩 2026-10-04' -> '전처리 유러피안 믹스'
+    """
+    # 1. 날짜 패턴 제거 (예: 2026-10-04, 2026.10.04, 10-04, 10월 04일 등)
+    name = re.sub(r"\b\d{4}[-./]\d{1,2}[-./]\d{1,2}\b", "", name)
+    name = re.sub(r"\b\d{1,2}[-./]\d{1,2}\b", "", name)
+    name = re.sub(r"\d{1,2}월\s*\d{1,2}일", "", name)
+
+    # 2. 단위 표기만 제거 (규격인 3*3, 2*2 등은 보존)
+    # 팩, 박스, box, ea, 봉, 입 등의 단위 키워드 제거
+    name = re.sub(r"(?:\b|\s)(?:팩|박스|box|ea|봉|입)(?:\b|\s|$)", " ", name, flags=re.IGNORECASE)
+    # 중량 단위 (숫자+kg/g 형태 등) 제거
+    name = re.sub(r"\b\d+(?:\.\d+)?\s*(?:kg|g)\b", "", name, flags=re.IGNORECASE)
+
+    # 3. 괄호 안에 들어간 단위만 제거 (예: (팩), [box] 등. (3*3) 같은 규격 괄호는 보존)
+    name = re.sub(r"[\(\[\{]\s*(?:팩|박스|box|ea|봉|입|kg|g)\s*[\)\]\}]", "", name, flags=re.IGNORECASE)
+
+    # 4. 빈 괄호 정리
+    name = re.sub(r"[\(\[\{]\s*[\)\]\}]", "", name)
+
+    # 5. 연속 공백 단일화 및 양쪽 여백/특수문자 정리
+    name = re.sub(r"\s+", " ", name).strip()
+    name = name.strip("-=_~./ ")
+
+    return name
+
+
 # ==========================================
 # 1. 나무숲 일일 생산일보 함수 모음
 # ==========================================
 def parse_namusoop_text(text, default_filename=""):
-    """
-    텍스트에서 날짜, 원물을 제외한 완제품 목록 및 거래량(수량)을 동적으로 추출합니다.
-    """
     # 1. 일자 파싱
     date_match = re.search(r"(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일", text)
     if not date_match:
@@ -69,8 +96,14 @@ def parse_namusoop_text(text, default_filename=""):
         sheet_name = clean_fname[:10] if clean_fname else "31일"
         lot_date = "20260831"
 
-    # 2. 제외할 원물 키워드 및 시스템 헤더 단어 목록
-    RAW_EXCLUDE_KEYWORDS = ["원물", "원재료", "벌크", "입고", "단가", "공급가액", "부가세", "합계", "비고"]
+    # 2. 필터링 키워드 (소계, 금액, 팔레트, 원물 등 제외)
+    EXCLUDE_KEYWORDS = [
+        "소계", "소 계", "합계", "합 계", "총계", "누적",
+        "금액", "단가", "공급가", "부가세", "세액",
+        "팔레트", "파레트", "plt", "PLT", "pallet",
+        "원물", "원재료", "벌크", "입고", "반품", "폐기",
+        "비고", "코드"
+    ]
 
     items_data = []
     lines = text.split("\n")
@@ -80,20 +113,27 @@ def parse_namusoop_text(text, default_filename=""):
         if not line_clean:
             continue
 
-        # 원물 키워드 또는 표 헤더 라인은 제외
-        if any(keyword in line_clean for keyword in RAW_EXCLUDE_KEYWORDS):
+        # 소계, 금액, 팔레트, 원물 등의 행 건너뛰기
+        if any(keyword in line_clean for keyword in EXCLUDE_KEYWORDS):
             continue
 
-        # 패턴: 제품명 + 수량 (정수 또는 소수점 형태 + 선택적 단위 kg/Kg/EA)
+        # 정규식 패턴: [품목 텍스트] + [수량(숫자/소수점)] + [단위(선택)]
         match = re.search(
-            r"([가-힣A-Za-z0-9\(\)\*\s_~-]+?)\s+([\d,]+(?:\.\d+)?)\s*(?:kg|Kg|EA|ea|개)?(?:\s+|$)",
+            r"([가-힣A-Za-z0-9\(\)\*xX\s_~./-]+?)\s+([\d,]+(?:\.\d+)?)\s*(?:kg|Kg|EA|ea|개|팩)?(?:\s+|$)",
             line_clean,
         )
         if match:
-            item_name = match.group(1).strip()
+            raw_item_name = match.group(1).strip()
             qty_str = match.group(2).replace(",", "")
 
-            # 불필요한 번호나 1글자 노이즈 제거
+            # 제품명 정제: 날짜, 단위 제거 (3*3 등의 규격은 남김)
+            item_name = clean_item_name(raw_item_name)
+
+            # 정제 후 필터링 키워드와 단독 일치할 경우 제외
+            if any(keyword == item_name.replace(" ", "") for keyword in ["소계", "금액", "팔레트", "파레트", "합계"]):
+                continue
+
+            # 불필요한 번호나 1글자 이하 제외
             if len(item_name) <= 1 or item_name.isdigit():
                 continue
 
@@ -104,7 +144,6 @@ def parse_namusoop_text(text, default_filename=""):
             except ValueError:
                 continue
 
-    # 동적 추출 데이터가 없을 경우 기본 안내 행 처리
     if not items_data:
         items_data = [("데이터 파싱 실패 (서식 확인 필요)", 0.0)]
 
